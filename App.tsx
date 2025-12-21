@@ -17,44 +17,136 @@ const App: React.FC = () => {
   const [currentChallenge, setCurrentChallenge] = useState<Challenge | null>(null);
   const [result, setResult] = useState<VerificationResult | null>(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
+  const [isGyroReady, setIsGyroReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const gyroCleanupRef = useRef<(() => void) | null>(null);
 
-  // Initialize Camera
-  const startCamera = async () => {
+  // Check if iOS Safari
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+
+  // Request Device Orientation Permission (iOS Safari requirement)
+  const requestGyroPermission = async (): Promise<boolean> => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } 
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setIsCameraReady(true);
+      // Check if DeviceOrientationEvent.requestPermission exists (iOS 13+)
+      if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
+        const permission = await (DeviceOrientationEvent as any).requestPermission();
+        return permission === 'granted';
       }
+      // Android and older iOS don't require explicit permission
+      return true;
     } catch (err) {
-      setError("Camera access denied. Please allow camera permissions to continue.");
+      console.error('Error requesting gyro permission:', err);
+      return false;
     }
   };
 
-  // Initialize Sensors
-  useEffect(() => {
+  // Initialize Gyroscope/Orientation Sensor
+  const initializeGyro = async () => {
+    // Clean up existing listener if any
+    if (gyroCleanupRef.current) {
+      gyroCleanupRef.current();
+      gyroCleanupRef.current = null;
+    }
+
+    const hasPermission = await requestGyroPermission();
+    if (!hasPermission) {
+      setError("Motion sensor access denied. Please allow motion sensor permissions to continue.");
+      return;
+    }
+
     const handleOrientation = (event: DeviceOrientationEvent) => {
       setGyro({
-        alpha: event.alpha,
-        beta: event.beta,
-        gamma: event.gamma,
+        alpha: event.alpha ?? 0,
+        beta: event.beta ?? 0,
+        gamma: event.gamma ?? 0,
       });
+      setIsGyroReady(true);
     };
 
     if (window.DeviceOrientationEvent) {
       window.addEventListener('deviceorientation', handleOrientation);
+      gyroCleanupRef.current = () => {
+        window.removeEventListener('deviceorientation', handleOrientation);
+      };
+    } else {
+      setError("Device orientation not supported on this device.");
     }
+  };
 
-    return () => {
-      window.removeEventListener('deviceorientation', handleOrientation);
-    };
-  }, []);
+  // Initialize Camera
+  const startCamera = async () => {
+    try {
+      // Adjust camera constraints for iOS compatibility
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: 'user',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+
+      // For iOS, use more compatible constraints
+      if (isIOS) {
+        constraints.video = {
+          facingMode: 'user',
+          width: { ideal: 640 },
+          height: { ideal: 480 }
+        } as MediaTrackConstraints;
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        // Ensure video plays on iOS
+        videoRef.current.setAttribute('playsinline', 'true');
+        videoRef.current.setAttribute('webkit-playsinline', 'true');
+        // For iOS, we need to play the video explicitly
+        try {
+          await videoRef.current.play();
+        } catch (playError) {
+          console.warn('Video play() failed:', playError);
+        }
+        setIsCameraReady(true);
+      }
+    } catch (err: any) {
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setError("Camera access denied. Please allow camera permissions to continue.");
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setError("No camera found. Please ensure your device has a camera.");
+      } else {
+        setError(`Camera error: ${err.message || 'Unknown error'}`);
+      }
+    }
+  };
+
+  // Initialize Sensors - only after user gesture (iOS requirement)
+  useEffect(() => {
+    // On iOS, we'll request permission when user clicks "Start Liveness Test"
+    // For Android, we can initialize immediately if available
+    if (!isIOS && window.DeviceOrientationEvent) {
+      const handleOrientation = (event: DeviceOrientationEvent) => {
+        setGyro({
+          alpha: event.alpha ?? 0,
+          beta: event.beta ?? 0,
+          gamma: event.gamma ?? 0,
+        });
+        setIsGyroReady(true);
+      };
+      window.addEventListener('deviceorientation', handleOrientation);
+      gyroCleanupRef.current = () => {
+        window.removeEventListener('deviceorientation', handleOrientation);
+      };
+      return () => {
+        if (gyroCleanupRef.current) {
+          gyroCleanupRef.current();
+          gyroCleanupRef.current = null;
+        }
+      };
+    }
+  }, [isIOS]);
 
   const captureFrame = (): string | null => {
     if (!videoRef.current || !canvasRef.current) return null;
@@ -124,6 +216,7 @@ const App: React.FC = () => {
           playsInline 
           muted 
           className={`w-full h-full object-cover transition-opacity duration-1000 ${isCameraReady ? 'opacity-100' : 'opacity-0'}`}
+          style={{ transform: 'scaleX(-1)' }}
         />
         
         {/* Overlay Layers */}
@@ -173,7 +266,11 @@ const App: React.FC = () => {
               We need access to your camera and motion sensors to verify that you are a real person.
             </p>
             <button 
-              onClick={startCamera}
+              onClick={async () => {
+                // Request both camera and gyro permissions
+                await initializeGyro();
+                await startCamera();
+              }}
               className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-2xl transition-all shadow-lg active:scale-95"
             >
               Start Liveness Test
@@ -219,7 +316,7 @@ const App: React.FC = () => {
 
       {/* Control Panel */}
       <div className="w-full max-w-md mt-6 space-y-4">
-        {isCameraReady && status === LivenessStatus.IDLE && (
+        {isCameraReady && isGyroReady && status === LivenessStatus.IDLE && (
           <button 
             onClick={startVerification}
             className="w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold rounded-2xl transition-all shadow-xl flex items-center justify-center gap-3"
@@ -227,6 +324,15 @@ const App: React.FC = () => {
             <i className="fas fa-shield-alt"></i>
             Run Liveness Check
           </button>
+        )}
+        
+        {isCameraReady && !isGyroReady && (
+          <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl flex items-center gap-3">
+            <i className="fas fa-exclamation-triangle text-yellow-500"></i>
+            <p className="text-yellow-400 text-xs font-medium">
+              Motion sensors not ready. Please ensure you've granted motion sensor permissions.
+            </p>
+          </div>
         )}
 
         {error && (
