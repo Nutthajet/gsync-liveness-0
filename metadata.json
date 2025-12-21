@@ -1,0 +1,8 @@
+{
+  "name": "Ainu Liveness Pro",
+  "description": "An advanced AI-powered liveness detection system using camera frames and gyroscope sensor data to prevent spoofing. Built with Gemini 3 for intelligent visual-spatial verification.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
